@@ -27,3 +27,9 @@ To fazendo um visualizador de isolamento de transações em SQL.
 | 1  | 2000        |
 +----+-------------+
 ```
+
+
+
+# Referências
+
+https://dzone.com/articles/sql-phenomena-for-developers
