@@ -1,0 +1,118 @@
+#!/usr/bin/env ruby
+
+DEFAULT_SCHEMA = {
+    table_name: 'products',
+    columns: {
+        id: { type: :integer },
+        price_cents: {
+            type: :integer,
+            default: 0,
+        }
+    }
+}
+
+# Reset the database
+def reset_dat_file
+    File.open("database.dat", 'w') do |file|
+        file.write("")
+    end
+end
+
+def print_header
+    schema = DEFAULT_SCHEMA
+    puts "+----------------+------------+---------+"
+    puts "| Column Name    | Type       | Default |"
+    puts "+----------------+------------+---------+"
+    schema[:columns].each do |column_name, column_properties|
+        puts "| #{column_name.to_s.ljust(14)} | #{column_properties[:type].to_s.ljust(10)} | #{column_properties[:default].to_s.ljust(7)} |"
+    end
+    puts "+----------------+------------+---------+"
+end
+
+def print_rows
+    rows = database_rows
+    puts "+----+-------------+"
+    puts "| #{DEFAULT_SCHEMA[:columns].keys[0].to_s.upcase.ljust(2)} | #{DEFAULT_SCHEMA[:columns].keys[1].to_s.upcase.gsub('_', ' ').ljust(10)} |"
+    puts "+----+-------------+"
+    rows.each do |row|
+        puts "| #{row[0].to_s.ljust(2)} | #{row[1].to_s.ljust(11)} |"
+    end
+    puts "+----+-------------+"
+end
+
+def print_table
+    print_header
+    print_rows
+end
+
+# Create a our database
+def create_dat_file(schema)
+    File.open("database.dat", 'w') do |file|
+        schema[:columns].each do |column_name, column_properties|
+            file.write("column: #{column_name}, type: #{column_properties[:type]}, default: #{column_properties[:default]}\n")
+        end
+    end
+end
+
+# Insert a new row
+def insert_row(schema, row)
+    File.open("database.dat", 'a') do |file|
+        row_data = schema[:columns].keys.map { |col| row[col] || schema[:columns][col][:default] }
+        file.write(row_data.join(",") + "\n")
+    end
+end
+
+def database_rows
+    rows = []
+    File.open("database.dat", 'r') do |file|
+        file.each_line do |line|
+            next if line.start_with?("column")
+            rows << line.chomp.split(",").map(&:strip)
+        end
+    end
+
+    rows
+end
+
+def find(id)
+    rows = database_rows
+    rows.each do |row|
+        if row[0] == id.to_s
+            return DEFAULT_SCHEMA[:columns].keys.zip(row).to_h
+        end
+    end
+
+    nil
+end
+
+# Update
+def update_column(schema, id, column_name, new_value)
+    rows = database_rows
+    updated_rows = rows.map do |row|
+        if row[0] == id.to_s
+            row[schema[:columns].keys.index(column_name)] = new_value
+        end
+        row
+    end
+
+    File.open("database.dat", 'w') do |file|
+        updated_rows.each do |row|
+            file.write(row.join(",") + "\n")
+        end
+    end
+end
+
+
+
+# We will support only one table
+create_dat_file(DEFAULT_SCHEMA)
+
+# Insert a new row
+insert_row(DEFAULT_SCHEMA, { id: 1, price_cents: 1000 })
+
+print_table
+
+# update
+update_column(DEFAULT_SCHEMA, 1, :price_cents, 2000)
+
+print_table
