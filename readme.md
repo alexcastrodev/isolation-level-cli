@@ -33,3 +33,5 @@ To fazendo um visualizador de isolamento de transações em SQL.
 # Referências
 
 https://dzone.com/articles/sql-phenomena-for-developers
+
+https://pmg.csail.mit.edu/papers/icde00.pdf
