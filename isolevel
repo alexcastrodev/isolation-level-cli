@@ -1,118 +1,194 @@
 #!/usr/bin/env ruby
+require 'readline'
 
+# === Schema Definition ===
 DEFAULT_SCHEMA = {
-    table_name: 'products',
-    columns: {
-        id: { type: :integer },
-        price_cents: {
-            type: :integer,
-            default: 0,
-        }
-    }
+  table_name: 'products',
+  columns: {
+    id:          { type: :integer, default: nil },
+    price_cents: { type: :integer, default: 0   }
+  }
 }
+DATABASE_FILE = 'database.dat'
 
-# Reset the database
-def reset_dat_file
-    File.open("database.dat", 'w') do |file|
-        file.write("")
-    end
+# ======================
+# Helpers
+# ======================
+
+def load_committed_rows
+  File.write(DATABASE_FILE, '') unless File.exist?(DATABASE_FILE)
+  File.read(DATABASE_FILE).each_line.with_object([]) do |line, rows|
+    next if line.strip.empty? || line.start_with?('column')
+    rows << line.chomp.split(',').map(&:strip)
+  end
 end
 
-def print_header
-    schema = DEFAULT_SCHEMA
-    puts "+----------------+------------+---------+"
-    puts "| Column Name    | Type       | Default |"
-    puts "+----------------+------------+---------+"
-    schema[:columns].each do |column_name, column_properties|
-        puts "| #{column_name.to_s.ljust(14)} | #{column_properties[:type].to_s.ljust(10)} | #{column_properties[:default].to_s.ljust(7)} |"
-    end
-    puts "+----------------+------------+---------+"
+def write_committed_rows(rows)
+  File.open(DATABASE_FILE, 'w') do |f|
+    rows.each { |r| f.puts r.join(',') }
+  end
 end
 
-def print_rows
-    rows = database_rows
-    puts "+----+-------------+"
-    puts "| #{DEFAULT_SCHEMA[:columns].keys[0].to_s.upcase.ljust(2)} | #{DEFAULT_SCHEMA[:columns].keys[1].to_s.upcase.gsub('_', ' ').ljust(10)} |"
-    puts "+----+-------------+"
-    rows.each do |row|
-        puts "| #{row[0].to_s.ljust(2)} | #{row[1].to_s.ljust(11)} |"
-    end
-    puts "+----+-------------+"
+  def print_header
+  puts '+----------------+------------+---------+'
+  puts '| Column Name    | Type       | Default |'
+  puts '+----------------+------------+---------+'
+  DEFAULT_SCHEMA[:columns].each do |name, props|
+    puts "| #{name.to_s.ljust(14)} | #{props[:type].to_s.ljust(10)} | #{props[:default].to_s.ljust(7)} |"
+  end
+  puts '+----------------+------------+---------+'
 end
 
-def print_table
-    print_header
-    print_rows
+def print_rows(rows)
+  puts '+----+-------------+'
+  h1 = DEFAULT_SCHEMA[:columns].keys[0].to_s.upcase.ljust(2)
+  h2 = DEFAULT_SCHEMA[:columns].keys[1].to_s.upcase.gsub('_',' ').ljust(10)
+  puts "| #{h1} | #{h2} |"
+  puts '+----+-------------+'
+  rows.each { |r| puts "| #{r[0].ljust(2)} | #{r[1].ljust(11)} |" }
+  puts '+----+-------------+'
 end
 
-# Create a our database
-def create_dat_file(schema)
-    File.open("database.dat", 'w') do |file|
-        schema[:columns].each do |column_name, column_properties|
-            file.write("column: #{column_name}, type: #{column_properties[:type]}, default: #{column_properties[:default]}\n")
-        end
+def merge_rows(base, actions)
+  visible = base.map(&:dup)
+  actions.each do |act|
+    id, val = act[:row]
+    if act[:type] == :update
+      visible.reject! { |r| r[0] == id }
+      visible << [id, val]
+    else # :insert
+      visible << [id, val]
     end
+  end
+  visible
 end
 
-# Insert a new row
-def insert_row(schema, row)
-    File.open("database.dat", 'a') do |file|
-        row_data = schema[:columns].keys.map { |col| row[col] || schema[:columns][col][:default] }
-        file.write(row_data.join(",") + "\n")
-    end
+# ======================
+#  Session Store 
+#  Each session: { isolation:, snapshot:, pending: [] }
+# ======================
+Sessions = {}
+
+# ======================
+# CLI Help
+# ======================
+def show_help
+  puts '=== Simple DB CLI Simulation ==='
+  puts 'Commands:'
+  puts '  <session> BEGIN [READ_UNCOMMITTED|READ_COMMITTED|REPEATABLE_READ|SERIALIZABLE]'
+  puts '  <session> INSERT price_cents=<v>              # id is auto-generated'
+  puts '  <session> UPDATE id=<v> price_cents=<v>'
+  puts '  <session> SELECT                               # reads all visible rows'
+  puts '  <session> COMMIT'
+  puts '  <session> ROLLBACK'
+  puts '  EXIT'
+  puts
 end
 
-def database_rows
-    rows = []
-    File.open("database.dat", 'r') do |file|
-        file.each_line do |line|
-            next if line.start_with?("column")
-            rows << line.chomp.split(",").map(&:strip)
-        end
+show_help
+
+# ======================
+# REPL
+# ======================
+loop do
+  line = Readline.readline('> ', true)
+  if line.nil? || line.strip.upcase == 'EXIT'
+    Sessions.each do |s, data|
+      if data[:pending]&.any?
+        puts "#{s}: ROLLBACK due to session exit"
+      end
+    end
+    break
+  end
+
+  tokens = line.strip.split
+  next if tokens.empty?
+
+  session = tokens.shift
+  cmd = tokens.shift&.upcase
+
+  case cmd
+  when 'BEGIN'
+    lvl = tokens.shift&.upcase
+    iso = case lvl
+          when 'READ_UNCOMMITTED' then :read_uncommitted
+          when 'READ_COMMITTED'   then :read_committed
+          when 'REPEATABLE_READ'  then :repeatable_read
+          when 'SERIALIZABLE'     then :serializable
+          else
+            puts "#{session}: Unknown isolation level #{lvl}"
+            next
+          end
+    snap = load_committed_rows
+    Sessions[session] = { isolation: iso, snapshot: snap, pending: [] }
+    puts "#{session}: BEGIN transaction (isolation=#{iso})"
+
+  when 'INSERT'
+    unless Sessions[session]
+      puts "#{session}: ERROR - no active transaction"
+      next
+    end
+    params = tokens.join(' ').scan(/(\w+)=([0-9]+)/).to_h
+    committed = load_committed_rows
+    all_pending = Sessions.values.flat_map { |d| d[:pending].map { |a| a[:row] } }
+    existing_ids = committed.map { |r| r[0].to_i } + all_pending.map { |r| r[0].to_i }
+    next_id = (existing_ids.max || 0) + 1
+    price = params['price_cents'] || DEFAULT_SCHEMA[:columns][:price_cents][:default].to_s
+    row = [next_id.to_s, price]
+    Sessions[session][:pending] << { type: :insert, row: row }
+    puts "#{session}: queued INSERT #{row.join(',')}"
+
+  when 'UPDATE'
+    unless Sessions[session]
+      puts "#{session}: ERROR - no active transaction"
+      next
+    end
+    params = tokens.join(' ').scan(/(\w+)=([0-9]+)/).to_h
+    row = [params['id'], params['price_cents']]
+    Sessions[session][:pending] << { type: :update, row: row }
+    puts "#{session}: queued UPDATE id=#{row[0]} price_cents=#{row[1]}"
+
+  when 'SELECT'
+    unless Sessions[session]
+      puts "#{session}: ERROR - no active transaction"
+      next
+    end
+    sess = Sessions[session]
+    base = case sess[:isolation]
+           when :read_uncommitted then load_committed_rows
+           when :read_committed   then load_committed_rows
+           else sess[:snapshot]
+           end
+    actions = sess[:isolation] == :read_uncommitted ?
+              Sessions.values.flat_map { |d| d[:pending] } :
+              sess[:pending]
+    rows = merge_rows(base, actions)
+    puts "#{session}: SELECT (#{sess[:isolation]})"
+    print_header; print_rows(rows)
+
+  when 'COMMIT'
+    unless Sessions[session]
+      puts "#{session}: ERROR - no active transaction"
+      next
+    end
+    base = load_committed_rows
+    Sessions[session][:pending].each do |act|
+      base.reject! { |r| r[0] == act[:row][0] } if act[:type] == :update
+      base << act[:row]
+    end
+    write_committed_rows(base)
+    Sessions[session][:pending].clear
+    puts "#{session}: COMMIT successful"
+
+  when 'ROLLBACK'
+    if Sessions[session]
+      Sessions[session][:pending].clear
+      puts "#{session}: ROLLBACK done"
+    else
+      puts "#{session}: ERROR - no active transaction"
     end
 
-    rows
+  else
+    puts "Unknown command: #{cmd}" unless cmd.nil?
+  end
 end
-
-def find(id)
-    rows = database_rows
-    rows.each do |row|
-        if row[0] == id.to_s
-            return DEFAULT_SCHEMA[:columns].keys.zip(row).to_h
-        end
-    end
-
-    nil
-end
-
-# Update
-def update_column(schema, id, column_name, new_value)
-    rows = database_rows
-    updated_rows = rows.map do |row|
-        if row[0] == id.to_s
-            row[schema[:columns].keys.index(column_name)] = new_value
-        end
-        row
-    end
-
-    File.open("database.dat", 'w') do |file|
-        updated_rows.each do |row|
-            file.write(row.join(",") + "\n")
-        end
-    end
-end
-
-
-
-# We will support only one table
-create_dat_file(DEFAULT_SCHEMA)
-
-# Insert a new row
-insert_row(DEFAULT_SCHEMA, { id: 1, price_cents: 1000 })
-
-print_table
-
-# update
-update_column(DEFAULT_SCHEMA, 1, :price_cents, 2000)
-
-print_table
